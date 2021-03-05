@@ -51,12 +51,24 @@ class KafkaProducerConnector(
   /** Sends msg to topic. This is an asynchronous operation. */
   override def send(topic: String, msg: Message, retry: Int = 3): Future[RecordMetadata] = {
     implicit val transid: TransactionId = msg.transid
+    /**
+     * 这里的topic就是"invoker${invoker.toInt}
+     * key 就是"messages"
+     * value 是序列化后的msg
+     * */
     val record = new ProducerRecord[String, String](topic, "messages", msg.serialize)
+    /**
+     * produced是Promise，也就是可写的Future
+     * */
     val produced = Promise[RecordMetadata]()
-
     Future {
       blocking {
         try {
+          /**
+           * 根据kafka文档的描述，
+           * send操作异步的将记录发送到topic，并在确认发送后立即调用callback。
+           * 发送是异步的，并且一旦记录已存储在等待发送的记录缓冲区中，此方法将立即返回。 这允许并行发送许多记录，而不会阻塞等待每个记录之后的响应。
+           * */
           producer.send(record, new Callback {
             override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit = {
               if (exception == null) produced.trySuccess(metadata)
@@ -70,8 +82,10 @@ class KafkaProducerConnector(
       }
     }
 
+    /** andThen是处理Future返回后的结果，这里其实在等待send的callback执行 **/
     produced.future.andThen {
       case Success(status) =>
+        /** 成功的发送，记录一下日志，并且将发送计数加1 **/
         logging.debug(this, s"sent message: ${status.topic()}[${status.partition()}][${status.offset()}]")
         sentCounter.next()
       case Failure(t) =>

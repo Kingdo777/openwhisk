@@ -33,14 +33,23 @@ import scala.annotation.tailrec
  * interface but only the methods needed.
  *
  * @param maxAllowed maximum number of permits given away by `tryAcquire`
+ *
+ *        ForcibleSemaphore主要是为了action创建容器所设计的，主要是用于分配invoker的内存资源
+ *        ForcibleSemaphore是NestedSemaphore的基类，他们都是每个invoker一个
+ *
  */
 class ForcibleSemaphore(maxAllowed: Int) {
   class Sync extends AbstractQueuedSynchronizer {
+    /**
+     * 这里的state是invoker的内存资源,maxAllowed是invoker的内存slot数目，以MB为单位
+     * */
     setState(maxAllowed)
 
     def permits: Int = getState
 
-    /** Try to release a permit and return whether or not that operation was successful. */
+    /** Try to release a permit and return whether or not that operation was successful.
+     * 释放内存，意味着删除一个容器实例
+     * */
     @tailrec
     override final def tryReleaseShared(releases: Int): Boolean = {
       val current = getState
@@ -61,6 +70,7 @@ class ForcibleSemaphore(maxAllowed: Int) {
      */
     @tailrec
     final def nonFairTryAcquireShared(acquires: Int): Int = {
+      //尝试申请，如果内存失败就会返回负数，而且不会真的减少内存
       val available = getState
       val remaining = available - acquires
       if (remaining < 0 || compareAndSetState(available, remaining)) {
@@ -76,6 +86,7 @@ class ForcibleSemaphore(maxAllowed: Int) {
      */
     @tailrec
     final def forceAquireShared(acquires: Int): Unit = {
+      //强制申请，这是出现了过载，此时state就会成为负数
       val available = getState
       val remaining = available - acquires
       if (!compareAndSetState(available, remaining)) {
@@ -85,6 +96,11 @@ class ForcibleSemaphore(maxAllowed: Int) {
   }
 
   private val sync = new Sync
+
+
+  /**
+   * 下面三个函数都是对是上面几个函数的简单封装，除了tryAcquire可能会失败之外，其他两个都是一定成功
+   * */
 
   /**
    * Acquires the given numbers of permits.
