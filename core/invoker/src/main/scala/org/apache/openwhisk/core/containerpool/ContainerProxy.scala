@@ -67,26 +67,34 @@ import scala.util.{Failure, Success}
 
 // States
 sealed trait ContainerState
+
 case object Uninitialized extends ContainerState
+
 case object Starting extends ContainerState
+
 case object Started extends ContainerState
+
 case object Running extends ContainerState
+
 case object Ready extends ContainerState
+
 case object Pausing extends ContainerState
+
 case object Paused extends ContainerState
+
 case object Removing extends ContainerState
 
 // Data
 /** Base data type */
 sealed abstract class ContainerData(val lastUsed: Instant, val memoryLimit: ByteSize, val activeActivationCount: Int) {
 
-  /** When ContainerProxy in this state is scheduled, it may result in a new state (ContainerData)*/
+  /** When ContainerProxy in this state is scheduled, it may result in a new state (ContainerData) */
   def nextRun(r: Run): ContainerData
 
   /**
-   *  Return Some(container) (for ContainerStarted instances) or None(for ContainerNotStarted instances)
-   *  Useful for cases where all ContainerData instances are handled, vs cases where only ContainerStarted
-   *  instances are handled */
+   * Return Some(container) (for ContainerStarted instances) or None(for ContainerNotStarted instances)
+   * Useful for cases where all ContainerData instances are handled, vs cases where only ContainerStarted
+   * instances are handled */
   def getContainer: Option[Container]
 
   /** String to indicate the state of this container after scheduling */
@@ -100,8 +108,9 @@ sealed abstract class ContainerData(val lastUsed: Instant, val memoryLimit: Byte
 sealed abstract class ContainerNotStarted(override val lastUsed: Instant,
                                           override val memoryLimit: ByteSize,
                                           override val activeActivationCount: Int)
-    extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
+  extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
   override def getContainer = None
+
   override val initingState = "cold"
 }
 
@@ -110,7 +119,7 @@ sealed abstract class ContainerStarted(val container: Container,
                                        override val lastUsed: Instant,
                                        override val memoryLimit: ByteSize,
                                        override val activeActivationCount: Int)
-    extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
+  extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
   override def getContainer = Some(container)
 }
 
@@ -118,6 +127,7 @@ sealed abstract class ContainerStarted(val container: Container,
 sealed abstract trait ContainerInUse {
   val activeActivationCount: Int
   val action: ExecutableWhiskAction
+
   def hasCapacity() =
     activeActivationCount < action.limits.concurrency.maxConcurrent
 }
@@ -129,14 +139,14 @@ sealed abstract trait ContainerNotInUse {
 
 /** type representing a cold (not running) container */
 case class NoData(override val activeActivationCount: Int = 0)
-    extends ContainerNotStarted(Instant.EPOCH, 0.B, activeActivationCount)
+  extends ContainerNotStarted(Instant.EPOCH, 0.B, activeActivationCount)
     with ContainerNotInUse {
   override def nextRun(r: Run) = WarmingColdData(r.msg.user.namespace.name, r.action, Instant.now, 1)
 }
 
 /** type representing a cold (not running) container with specific memory allocation */
 case class MemoryData(override val memoryLimit: ByteSize, override val activeActivationCount: Int = 0)
-    extends ContainerNotStarted(Instant.EPOCH, memoryLimit, activeActivationCount)
+  extends ContainerNotStarted(Instant.EPOCH, memoryLimit, activeActivationCount)
     with ContainerNotInUse {
   override def nextRun(r: Run) = WarmingColdData(r.msg.user.namespace.name, r.action, Instant.now, 1)
 }
@@ -147,11 +157,13 @@ case class PreWarmedData(override val container: Container,
                          override val memoryLimit: ByteSize,
                          override val activeActivationCount: Int = 0,
                          expires: Option[Deadline] = None)
-    extends ContainerStarted(container, Instant.EPOCH, memoryLimit, activeActivationCount)
+  extends ContainerStarted(container, Instant.EPOCH, memoryLimit, activeActivationCount)
     with ContainerNotInUse {
   override val initingState = "prewarmed"
+
   override def nextRun(r: Run) =
     WarmingData(container, r.msg.user.namespace.name, r.action, Instant.now, 1)
+
   def isExpired(): Boolean = expires.exists(_.isOverdue())
 }
 
@@ -161,9 +173,10 @@ case class WarmingData(override val container: Container,
                        action: ExecutableWhiskAction,
                        override val lastUsed: Instant,
                        override val activeActivationCount: Int = 0)
-    extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
+  extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
     with ContainerInUse {
   override val initingState = "warming"
+
   override def nextRun(r: Run) = copy(lastUsed = Instant.now, activeActivationCount = activeActivationCount + 1)
 }
 
@@ -172,9 +185,10 @@ case class WarmingColdData(invocationNamespace: EntityName,
                            action: ExecutableWhiskAction,
                            override val lastUsed: Instant,
                            override val activeActivationCount: Int = 0)
-    extends ContainerNotStarted(lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
+  extends ContainerNotStarted(lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
     with ContainerInUse {
   override val initingState = "warmingCold"
+
   override def nextRun(r: Run) = copy(lastUsed = Instant.now, activeActivationCount = activeActivationCount + 1)
 }
 
@@ -185,28 +199,38 @@ case class WarmedData(override val container: Container,
                       override val lastUsed: Instant,
                       override val activeActivationCount: Int = 0,
                       resumeRun: Option[Run] = None)
-    extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
+  extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
     with ContainerInUse {
   override val initingState = "warmed"
+
   override def nextRun(r: Run) = copy(lastUsed = Instant.now, activeActivationCount = activeActivationCount + 1)
+
   //track the resuming run for easily referring to the action being resumed (it may fail and be resent)
   def withoutResumeRun() = this.copy(resumeRun = None)
+
   def withResumeRun(job: Run) = this.copy(resumeRun = Some(job))
 }
 
 // Events received by the actor
 case class Start(exec: CodeExec[_], memoryLimit: ByteSize, ttl: Option[FiniteDuration] = None)
+
 case class Run(action: ExecutableWhiskAction, msg: ActivationMessage, retryLogDeadline: Option[Deadline] = None)
+
 case object Remove
+
 case class HealthPingEnabled(enabled: Boolean)
 
 // Events sent by the actor
 case class NeedWork(data: ContainerData)
+
 case object ContainerPaused
+
 case class ContainerRemoved(replacePrewarm: Boolean) // when container is destroyed
 case object RescheduleJob // job is sent back to parent and could not be processed because container is being destroyed
 case class PreWarmCompleted(data: PreWarmedData)
+
 case class InitCompleted(data: WarmedData)
+
 case object RunCompleted
 
 /**
@@ -216,42 +240,56 @@ case object RunCompleted
  *
  * The contract is as follows:
  * 1. If action.limits.concurrency.maxConcurrent == 1:
- *    Only one job is to be sent to the ContainerProxy at one time. ContainerProxy
- *    will delay all further jobs until a previous job has finished.
+ * Only one job is to be sent to the ContainerProxy at one time. ContainerProxy
+ * will delay all further jobs until a previous job has finished.
  *
- *    1a. The next job can be sent to the ContainerProxy after it indicates available
- *       capacity by sending NeedWork to its parent.
+ * 1a. The next job can be sent to the ContainerProxy after it indicates available
+ * capacity by sending NeedWork to its parent.
  *
  * 2. If action.limits.concurrency.maxConcurrent > 1:
- *    Parent must coordinate with ContainerProxy to attempt to send only data.action.limits.concurrency.maxConcurrent
- *    jobs for concurrent processing.
+ * Parent must coordinate with ContainerProxy to attempt to send only data.action.limits.concurrency.maxConcurrent
+ * jobs for concurrent processing.
  *
- *    Since the current job count is only periodically sent to parent, the number of jobs
- *    sent to ContainerProxy may exceed data.action.limits.concurrency.maxConcurrent,
- *    in which case jobs are buffered, so that only a max of action.limits.concurrency.maxConcurrent
- *    are ever sent into the container concurrently. Parent will NOT be signalled to send more jobs until
- *    buffered jobs are completed, but their order is not guaranteed.
+ * Since the current job count is only periodically sent to parent, the number of jobs
+ * sent to ContainerProxy may exceed data.action.limits.concurrency.maxConcurrent,
+ * in which case jobs are buffered, so that only a max of action.limits.concurrency.maxConcurrent
+ * are ever sent into the container concurrently. Parent will NOT be signalled to send more jobs until
+ * buffered jobs are completed, but their order is not guaranteed.
  *
- *    2a. The next job can be sent to the ContainerProxy after ContainerProxy has "concurrent capacity",
- *        indicated by sending NeedWork to its parent.
+ * 2a. The next job can be sent to the ContainerProxy after ContainerProxy has "concurrent capacity",
+ * indicated by sending NeedWork to its parent.
  *
  * 3. A Remove message can be sent at any point in time. Like multiple jobs though,
- *    it will be delayed until the currently running job finishes.
+ * it will be delayed until the currently running job finishes.
+ *
+ * ContainerProxy是一个封装了一个Container的proxy，用于追踪一个容器的生命周期，并保证容器和容器的client的之间的contract，
+ * contract包括了：
+ * 1、如果action不可并发
+ * -那么在同一时刻只能有一个job被发送到ContainerProxy，在前一个请求处理完成之前，ContainerProxy不会接受新的job
+ * -直到ContainerProxy向Parent发送NeedWork的消息之后，才会继续接受新的请求（这里的Parent指的是akka机制里面的父Actor）
+ * 注：ContainerPool每创建容器都时都会生成一个ContainerProxy，而ContainerPool和ContainerProxy都继承自Actor，因此ContainerPool也就是
+ * ContainerProxy的是父亲actor，ContainerPool控制容器的生成和action的分发
+ * 2、如果action可并发
+ * -ContainerProxy需要和ContainerPool协调以尝试发送maxConcurrent个任务以实现并发处理
+ * -因为ContainerProxy只能周期性的向ContainerPool发送当前正在处理的job数目，因此ContainerPool发来的请求可能超过maxConcurrent的限制（不懂为什么），
+ * 多出来的job将被会缓存，因此在容器中执行的请求最大只会是maxConcurrent，在缓存中的请求完成之前不会向ContainerProxy发送job
+ * -同样，当ContainerProxy拥有“并发资源后”会向ContainerPool发送NeedWork消息，以接收新的请求
+ * 3、容器的删除请求可以在任意时候发出，当ContainerProxy接受到删除的命令时会等待所有的job执行结束
  *
  * @constructor
- * @param factory a function generating a Container
- * @param sendActiveAck a function sending the activation via active ack
+ * @param factory         a function generating a Container
+ * @param sendActiveAck   a function sending the activation via active ack
  * @param storeActivation a function storing the activation in a persistent store
- * @param unusedTimeout time after which the container is automatically thrown away
- * @param pauseGrace time to wait for new work before pausing the container
+ * @param unusedTimeout   time after which the container is automatically thrown away
+ * @param pauseGrace      time to wait for new work before pausing the container
  */
 class ContainerProxy(factory: (TransactionId,
-                               String,
-                               ImageName,
-                               Boolean,
-                               ByteSize,
-                               Int,
-                               Option[ExecutableWhiskAction]) => Future[Container],
+  String,
+  ImageName,
+  Boolean,
+  ByteSize,
+  Int,
+  Option[ExecutableWhiskAction]) => Future[Container],
                      sendActiveAck: ActiveAck,
                      storeActivation: (TransactionId, WhiskActivation, Boolean, UserContext) => Future[Any],
                      collectLogs: LogsCollector,
@@ -262,8 +300,11 @@ class ContainerProxy(factory: (TransactionId,
                      unusedTimeout: FiniteDuration,
                      pauseGrace: FiniteDuration,
                      testTcp: Option[ActorRef])
-    extends FSM[ContainerState, ContainerData]
+  extends FSM[ContainerState, ContainerData]
     with Stash {
+  /**
+   * FSM是用Actor机制实现的状态机,在某一状态下，当接受到此状态的事件时,执行对应的方法
+   * */
   implicit val ec = context.system.dispatcher
   implicit val logging = new AkkaLogging(context.system.log)
   implicit val ac = context.system
@@ -283,6 +324,8 @@ class ContainerProxy(factory: (TransactionId,
   when(Uninitialized) {
     // pre warm a container (creates a stem cell container)
     case Event(job: Start, _) =>
+
+      /** 这里开始就是调用真正的创建容器 * */
       factory(
         TransactionId.invokerWarmup,
         ContainerProxy.containerName(instance, "prewarm", job.exec.kind),
@@ -292,9 +335,18 @@ class ContainerProxy(factory: (TransactionId,
         poolConfig.cpuShare(job.memoryLimit),
         None)
         .map(container =>
+
+          /**
+           * container成功后，创建PreWarmCompleted event
+           * */
           PreWarmCompleted(PreWarmedData(container, job.exec.kind, job.memoryLimit, expires = job.ttl.map(_.fromNow))))
+
+        /**
+         * 将PreWarmCompleted发给自己
+         * */
         .pipeTo(self)
 
+      /** FSM进入Starting状态 * */
       goto(Starting)
 
     // cold start (no container to reuse or available stem cell container)
@@ -327,8 +379,8 @@ class ContainerProxy(factory: (TransactionId,
             // the failure is either the system fault, or for docker actions, the application/developer fault
             val response = t match {
               case WhiskContainerStartupError(msg) => ActivationResponse.whiskError(msg)
-              case BlackboxStartupError(msg)       => ActivationResponse.developerError(msg)
-              case _                               => ActivationResponse.whiskError(Messages.resourceProvisionError)
+              case BlackboxStartupError(msg) => ActivationResponse.developerError(msg)
+              case _ => ActivationResponse.whiskError(Messages.resourceProvisionError)
             }
             val context = UserContext(job.msg.user)
             // construct an appropriate activation and record it in the datastore,
@@ -358,7 +410,11 @@ class ContainerProxy(factory: (TransactionId,
   when(Starting) {
     // container was successfully obtained
     case Event(completed: PreWarmCompleted, _) =>
+
+      /** 告诉pool已经就绪，可以工作了 * */
       context.parent ! NeedWork(completed.data)
+
+      /** 进入started * */
       goto(Started) using completed.data
 
     // container creation failed
@@ -427,13 +483,13 @@ class ContainerProxy(factory: (TransactionId,
         goto(Ready) using newData
       }
     case Event(job: Run, data: WarmedData)
-        if activeCount >= data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if we are over concurrency limit, and not a failure on resume
+      if activeCount >= data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if we are over concurrency limit, and not a failure on resume
       implicit val transid = job.msg.transid
       logging.warn(this, s"buffering for maxed warm container ${data.container}; ${activeCount} activations in flight")
       runBuffer = runBuffer.enqueue(job)
       stay()
     case Event(job: Run, data: WarmedData)
-        if activeCount < data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if there was a delay, and not a failure on resume, skip the run
+      if activeCount < data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if there was a delay, and not a failure on resume, skip the run
       activeCount += 1
       implicit val transid = job.msg.transid
       bufferProcessing = false //reset buffer processing state
@@ -470,7 +526,7 @@ class ContainerProxy(factory: (TransactionId,
       //reuse an existing init failure for any buffered activations that will be aborted
       val r = f.cause match {
         case ActivationUnsuccessfulError(r) => Some(r.response)
-        case _                              => None
+        case _ => None
       }
       destroyContainer(data, true, true, r)
 
@@ -528,9 +584,9 @@ class ContainerProxy(factory: (TransactionId,
   }
 
   when(Pausing) {
-    case Event(ContainerPaused, data: WarmedData)   => goto(Paused)
+    case Event(ContainerPaused, data: WarmedData) => goto(Paused)
     case Event(_: FailureMessage, data: WarmedData) => destroyContainer(data, true)
-    case _                                          => delay
+    case _ => delay
   }
 
   when(Paused, stateTimeout = unusedTimeout) {
@@ -682,7 +738,7 @@ class ContainerProxy(factory: (TransactionId,
 
     val unpause = stateName match {
       case Paused => container.resume()(TransactionId.invokerNanny)
-      case _      => Future.successful(())
+      case _ => Future.successful(())
     }
 
     unpause
@@ -774,6 +830,9 @@ class ContainerProxy(factory: (TransactionId,
    */
   def initializeAndRun(container: Container, job: Run, reschedule: Boolean = false)(
     implicit tid: TransactionId): Future[WhiskActivation] = {
+    /**
+     * action的执行超时时间
+     * */
     val actionTimeout = job.action.limits.timeout.duration
     val unlockedArgs =
       ContainerProxy.unlockArguments(job.msg.content, job.msg.lockedArgs, ParameterEncryption.singleton)
@@ -940,13 +999,14 @@ class ContainerProxy(factory: (TransactionId,
         Future.successful(act)
       case Right(act) =>
         if ((act.response.isContainerError && activationErrorLoggingConfig.developerErrors) ||
-            (act.response.isWhiskError && activationErrorLoggingConfig.whiskErrors)) {
+          (act.response.isWhiskError && activationErrorLoggingConfig.whiskErrors)) {
           logTruncatedError(act)
         }
         Future.failed(ActivationUnsuccessfulError(act))
       case Left(error) => Future.failed(error)
     }
   }
+
   //to ensure we don't blow up logs with potentially large activation response error
   private def logTruncatedError(act: WhiskActivation) = {
     val truncate = 1024
@@ -964,26 +1024,28 @@ class ContainerProxy(factory: (TransactionId,
 }
 
 final case class ContainerProxyTimeoutConfig(idleContainer: FiniteDuration, pauseGrace: FiniteDuration)
+
 final case class ContainerProxyHealthCheckConfig(enabled: Boolean, checkPeriod: FiniteDuration, maxFails: Int)
+
 final case class ContainerProxyActivationErrorLogConfig(applicationErrors: Boolean,
                                                         developerErrors: Boolean,
                                                         whiskErrors: Boolean)
 
 object ContainerProxy {
   def props(factory: (TransactionId,
-                      String,
-                      ImageName,
-                      Boolean,
-                      ByteSize,
-                      Int,
-                      Option[ExecutableWhiskAction]) => Future[Container],
+    String,
+    ImageName,
+    Boolean,
+    ByteSize,
+    Int,
+    Option[ExecutableWhiskAction]) => Future[Container],
             ack: ActiveAck,
             store: (TransactionId, WhiskActivation, Boolean, UserContext) => Future[Any],
             collectLogs: LogsCollector,
             instance: InvokerInstanceId,
             poolConfig: ContainerPoolConfig,
             healthCheckConfig: ContainerProxyHealthCheckConfig =
-              loadConfigOrThrow[ContainerProxyHealthCheckConfig](ConfigKeys.containerProxyHealth),
+            loadConfigOrThrow[ContainerProxyHealthCheckConfig](ConfigKeys.containerProxyHealth),
             activationErrorLogConfig: ContainerProxyActivationErrorLogConfig = activationErrorLogging,
             unusedTimeout: FiniteDuration = timeouts.idleContainer,
             pauseGrace: FiniteDuration = timeouts.pauseGrace,
@@ -1004,7 +1066,14 @@ object ContainerProxy {
 
   // Needs to be thread-safe as it's used by multiple proxies concurrently.
   private val containerCount = new Counter
-
+  /**
+   * timeouts {
+   * # The "unusedTimeout" in the ContainerProxy,
+   * #aka 'How long should a container sit idle until we kill it?'
+   * idle-container = 10 minutes
+   * pause-grace = 50 milliseconds
+   * }
+   * */
   val timeouts = loadConfigOrThrow[ContainerProxyTimeoutConfig](ConfigKeys.containerProxyTimeouts)
   val activationErrorLogging =
     loadConfigOrThrow[ContainerProxyActivationErrorLogConfig](ConfigKeys.containerProxyActivationErrorLogs)
@@ -1028,9 +1097,9 @@ object ContainerProxy {
   /**
    * Creates a WhiskActivation ready to be sent via active ack.
    *
-   * @param job the job that was executed
+   * @param job           the job that was executed
    * @param totalInterval the time it took to execute the job
-   * @param response the response to return to the user
+   * @param response      the response to return to the user
    * @return a WhiskActivation to be sent to the user
    */
   def constructWhiskActivation(job: Run,
@@ -1078,13 +1147,13 @@ object ContainerProxy {
    * Partitions the activation arguments into two JsObject instances. The first is exported as intended for export
    * by the action runtime to the environment. The second is passed on as arguments to the action.
    *
-   * @param content the activation arguments
+   * @param content  the activation arguments
    * @param initArgs set of parameters to treat as initialization arguments
    * @return A partition of the arguments into an environment variables map and the JsObject argument to the action
    */
   def partitionArguments(content: Option[JsObject], initArgs: Set[String]): (Map[String, JsValue], JsObject) = {
     content match {
-      case None                         => (Map.empty, JsObject.empty)
+      case None => (Map.empty, JsObject.empty)
       case Some(js) if initArgs.isEmpty => (Map.empty, js)
       case Some(js) =>
         val (env, args) = js.fields.partition(k => initArgs.contains(k._1))
@@ -1099,7 +1168,7 @@ object ContainerProxy {
       case JsObject(fields) =>
         JsObject(fields.map {
           case (k, v: JsString) if lockedArgs.contains(k) => (k -> decoder.encryptor(lockedArgs(k)).decrypt(v))
-          case p                                          => p
+          case p => p
         })
     }
   }
@@ -1114,10 +1183,11 @@ class TCPPingClient(tcp: ActorRef,
                     containerId: String,
                     remote: InetSocketAddress,
                     config: ContainerProxyHealthCheckConfig)
-    extends Actor {
+  extends Actor {
   implicit val logging = new AkkaLogging(context.system.log)
   implicit val ec = context.system.dispatcher
   implicit var healthPingTx = TransactionId.actionHealthPing
+
   case object HealthPingSend
 
   var scheduledPing: Option[Cancellable] = None
@@ -1130,9 +1200,11 @@ class TCPPingClient(tcp: ActorRef,
     scheduledPing = Some(
       context.system.scheduler.schedule(config.checkPeriod, config.checkPeriod, self, HealthPingSend))
   }
+
   private def cancelPing() = {
     scheduledPing.foreach(_.cancel())
   }
+
   def receive = {
     case HealthPingEnabled(enabled) =>
       if (enabled) {

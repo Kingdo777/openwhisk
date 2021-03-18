@@ -31,6 +31,13 @@ case class ActivationEntityLimitConf(serdesOverhead: ByteSize, payload: Activati
  * parameters for triggers.
  */
 protected[core] object ActivationEntityLimit {
+  /**
+   * payload {
+            max = 1 m
+            truncation = 1 m
+        }
+     serdes-overhead = 6068 // 3034 bytes of metadata * 2 for extra headroom
+   * */
   private val config = loadConfigOrThrow[ActivationEntityLimitConf](ConfigKeys.activation)
 
   protected[core] val MAX_ACTIVATION_ENTITY_LIMIT: ByteSize = config.payload.max

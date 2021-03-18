@@ -43,23 +43,30 @@ case object AdjustPrewarmedContainer
  * time. The pool then waits for a response of that container, indicating
  * the container is done with the job. Only then will the pool send another
  * request to that container.
+ * 在同一时刻pool只会发送一个Job给child-actor，然后会等待容器的执行，直到完成了这个job，才会向此容器发送另一个job.
  *
  * Upon actor creation, the pool will start to prewarm containers according
  * to the provided prewarmConfig, iff set. Those containers will **not** be
  * part of the poolsize calculation, which is capped by the poolSize parameter.
  * Prewarm containers are only used, if they have matching arguments
  * (kind, memory) and there is space in the pool.
+ * 一旦pool被创建后，将会根据（prewarmConfig、iff）配置预启动“warm container”，
+ * 并且“warm container”的数目不会受到poolsize参数的限制，
+ * 只有当（kind、memory）均匹配且pool有足够空间时才会使用warmContainer。
  *
- * @param childFactory method to create new container proxy actor
- * @param feed actor to request more work from
+ * 一个invoker中只有一个pool,而且pool.userMem是自己写在配置文件whisk.container-pool中的
+ *
+ * @param childFactory  method to create new container proxy actor
+ * @param feed          actor to request more work from
  * @param prewarmConfig optional settings for container prewarming
- * @param poolConfig config for the ContainerPool
+ * @param poolConfig    config for the ContainerPool
  */
 class ContainerPool(childFactory: ActorRefFactory => ActorRef,
                     feed: ActorRef,
                     prewarmConfig: List[PrewarmingConfig] = List.empty,
                     poolConfig: ContainerPoolConfig)(implicit val logging: Logging)
-    extends Actor {
+  extends Actor {
+
   import ContainerPool.memoryConsumptionOf
 
   implicit val ec = context.dispatcher
@@ -71,22 +78,49 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
   // If all memory slots are occupied and if there is currently no container to be removed, than the actions will be
   // buffered here to keep order of computation.
   // Otherwise actions with small memory-limits could block actions with large memory limits.
+  /**
+   * 如果当前pool中已经没有内存和并发资源了，那么请求将会进入到队列中,在队列中，请求是按时间的到达顺序在队列中的，
+   * 这样就可以避免小内存任务饿死大内存任务
+   * */
   var runBuffer = immutable.Queue.empty[Run]
   // Track the resent buffer head - so that we don't resend buffer head multiple times
+  /** 跟踪重新发送的缓冲头-这样我们就不会多次重新发送缓冲头 * */
   var resent: Option[Run] = None
   val logMessageInterval = 10.seconds
   //periodically emit metrics (don't need to do this for each message!)
+  /**
+   * 周期性(第一次将在30s后发出，然后每10s发出一条)的向self发送EmitMetrics消息
+   */
   context.system.scheduler.schedule(30.seconds, 10.seconds, self, EmitMetrics)
 
   // Key is ColdStartKey, value is the number of cold Start in minute
+  /** 用于记录一个container(kind,memory)在一份中内冷启动的次数 * */
   var coldStartCount = immutable.Map.empty[ColdStartKey, Int]
-
-  adjustPrewarmedContainer(true, false)
+  /**
+   * 调整热容器的数目
+   * */
+  adjustPrewarmedContainer(init = true, scheduled = false)
 
   // check periodically, adjust prewarmed container(delete if unused for some time and create some increment containers)
   // add some random amount to this schedule to avoid a herd of container removal + creation
-  val interval = poolConfig.prewarmExpirationCheckInterval + poolConfig.prewarmExpirationCheckIntervalVariance
+  /**
+   * 周期性的检查，调整热容器的数目（如果一段时间未使用，则将其删除，并创建一些增量容器）
+   * 这里取决于prewarmConfig中的reactive参数，此参数类型为 ReactivePrewarmingConfig，用于以下字段：
+   * -minCount:热容器的最小个数
+   * -maxCount：热容器的最大个数
+   * -ttl:热容器的生存周期
+   * -threshold:过去1分钟冷启动的个数
+   * -increment:热容器的新增系数
+   * 每次周期检查时会进行如下操作：
+   * 1、检查当前热容器是否有过期的，如果有则删除此容器
+   * 2、通过math.min(math.max(config.minCount, (value / config.threshold) * config.increment), config.maxCount)确定新的热容器数目
+   * 3、如果当前容器实例数目超过目标数目则不需要操作，否则新增容器
+   * 注意，此参数才默认情况下是不开启的，也就是周期性检查是没有作用的，容器的个数始终维持在初始个数
+   * */
+  val interval: FiniteDuration = poolConfig.prewarmExpirationCheckInterval + poolConfig.prewarmExpirationCheckIntervalVariance
     .map(v =>
+
+      /** 返回一个伪随机数，它从此随机数生成器的序列中提取，在0（含）和指定值（不含）之间均匀分布的int值。 * */
       Random
         .nextInt(v.toSeconds.toInt))
     .getOrElse(0)
@@ -107,14 +141,32 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       akka.event.Logging.InfoLevel)
   }
 
+
+  /**
+   * LB的消息请求均由InvokerReactive接受，具体细节不清楚，然后LB会将消息分类后通过Actor发送到pool，
+   * 当然pool从InvokerReactive接收的仅有Run一种，即处理一个新的action请求
+   * */
+
   def receive: Receive = {
     // A job to run on a container
     //
     // Run messages are received either via the feed or from child containers which cannot process
     // their requests and send them back to the pool for rescheduling (this may happen if "docker" operations
     // fail for example, or a container has aged and was destroying itself when a new request was assigned)
+    /**
+     * Run消息产生有两种情况，意识feed接收的新的action请求，另一个是已经下发的请求由于容器过期或者执行错误，被重新发回容器pool进行重新调度
+     *
+     * case class Run(action: ExecutableWhiskAction, msg: ActivationMessage, retryLogDeadline: Option[Deadline] = None)
+     *
+     * */
     case r: Run =>
       // Check if the message is resent from the buffer. Only the first message on the buffer can be resent.
+      /**
+       * 检查是不是从Buffer中发送的消息，就是检查msg==Buff.head.msg？
+       * 如果是的话，那么此消息一定保存于resent变量中，Buff中的消息只能一个一个的派发（processBufferOrFeed），执行派发函数的入口有多个，
+       * 为了保证processBufferOrFeed不会重复的派发请求，于是设置了resent变量，只有当resent为空时，processBufferOrFeed执行才会将head request
+       * 赋值给resent变量
+       * */
       val isResentFromBuffer = runBuffer.nonEmpty && runBuffer.dequeueOption.exists(_._1.msg == r.msg)
 
       // Only process request, if there are no other requests waiting for free slots, or if the current request is the
@@ -123,34 +175,52 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       if (runBuffer.isEmpty || isResentFromBuffer) {
         if (isResentFromBuffer) {
           //remove from resent tracking - it may get resent again, or get processed
+          /** 此请求是Buffer中的head quest */
           resent = None
         }
         val kind = r.action.exec.kind
         val memory = r.action.limits.memory.megabytes.MB
 
-        val createdContainer =
-          // Schedule a job to a warm container
+        val createdContainer: Option[((ActorRef, ContainerData), String)] =
+        // Schedule a job to a warm container
           ContainerPool
+            /** schedule 方法是从freePool中依次查找warmed, warming, and warmingCold这三种类型的容器，找到其中拥有并发资源的容器 * */
             .schedule(r.action, r.msg.user.namespace.name, freePool)
+            /** 如果能找到的话就直接返回 * */
             .map(container => (container, container._2.initingState)) //warmed, warming, and warmingCold always know their state
+            /** 否则的话就寻找预热的容器，看看是否存在可用的 * */
             .orElse(
               // There was no warm/warming/warmingCold container. Try to take a prewarm container or a cold container.
               // When take prewarm container, has no need to judge whether user memory is enough
               takePrewarmContainer(r.action)
                 .map(container => (container, "prewarmed"))
                 .orElse {
+                  /**
+                   * 如果没有preContainer可用，那么就只能冷启动容器了，首先判断当前是否足够的空间
+                   * */
                   // Is there enough space to create a new container or do other containers have to be removed?
                   if (hasPoolSpaceFor(busyPool ++ freePool ++ prewarmedPool, prewarmStartingPool, memory)) {
                     val container = Some(createContainer(memory), "cold")
+                    /** 记录一次冷启动，用于preContainer的数目调整 * */
                     incrementColdStartCount(kind, memory)
                     container
                   } else None
                 })
             .orElse(
+              /**
+               * 到了这里说明，当前已经没有足够的空间创建新的容器了，需要移除容器来腾出空间
+               * */
               // Remove a container and create a new one for the given job
               ContainerPool
-              // Only free up the amount, that is really needed to free up
+                // Only free up the amount, that is really needed to free up
+                /**
+                 * 获取要删除的容器
+                 * 移除的容器的类型只能是WarmedData类型，而且是根据LRU策略进行移除的
+                 * */
                 .remove(freePool, Math.min(r.action.limits.memory.megabytes, memoryConsumptionOf(freePool)).MB)
+                /**
+                 * 将容器逐一删除，并将其从freepool和busypool中同时删除
+                 * */
                 .map(removeContainer)
                 // If the list had at least one entry, enough containers were removed to start the new container. After
                 // removing the containers, we are not interested anymore in the containers that have been removed.
@@ -162,7 +232,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
                       val container = (createContainer(memory), "recreated")
                       incrementColdStartCount(kind, memory)
                       container
-                  }))
+                    }))
 
         createdContainer match {
           case Some(((actor, data), containerState)) =>
@@ -227,6 +297,9 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       } else {
         // There are currently actions waiting to be executed before this action gets executed.
         // These waiting actions were not able to free up enough memory.
+        /**
+         * 如果runBuffer不是空的，而且此请求并非是新请求，则将其加入到runBuffer中
+         * */
         runBuffer = runBuffer.enqueue(r)
       }
 
@@ -289,7 +362,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
         adjustPrewarmedContainer(false, false) //in case a prewarm is removed due to health failure or crash
       }
 
-    // This message is received for one of these reasons:
+     // This message is received for one of these reasons:
     // 1. Container errored while resuming a warm container, could not process the job, and sent the job back
     // 2. The container aged, is destroying itself, and was assigned a job which it had to send back
     // 3. The container aged and is destroying itself
@@ -323,6 +396,14 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
     }
   }
 
+  /**
+   * 当前配置文件得到的配置如下：
+   * PrewarmingConfig(2,{"kind":"nodejs:10","code":"","binary":false},256 MB,None)
+   * initialCount=2
+   * exec={"kind":"nodejs:10","code":"","binary":false}
+   * memoryLimit=256MB
+   * reactive=None
+   * */
   /** adjust prewarm containers up to the configured requirements for each kind/memory combination. */
   def adjustPrewarmedContainer(init: Boolean, scheduled: Boolean): Unit = {
     if (scheduled) {
@@ -347,6 +428,8 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
         val desiredCount = c._2._2
         if (currentCount < desiredCount) {
           (currentCount until desiredCount).foreach { _ =>
+
+            /** 创建热容器 * */
             prewarmContainer(config.exec, config.memoryLimit, config.reactive.map(_.ttl))
           }
         }
@@ -358,6 +441,9 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
   }
 
   /** Creates a new container and updates state accordingly. */
+  /**
+   *  只能创建MemoryData类型的容器，而且此时的容器是没有启动的
+   * */
   def createContainer(memoryLimit: ByteSize): (ActorRef, ContainerData) = {
     val ref = childFactory(context)
     val data = MemoryData(memoryLimit)
@@ -368,8 +454,24 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
   /** Creates a new prewarmed container */
   def prewarmContainer(exec: CodeExec[_], memoryLimit: ByteSize, ttl: Option[FiniteDuration]): Unit = {
     if (hasPoolSpaceFor(busyPool ++ freePool ++ prewarmedPool, prewarmStartingPool, memoryLimit)) {
+      /** 创建新的容器
+       * 在这里调用的其实是ContainerProxy.ContainerProxy.props() 返回的是ContainerProxy对象，此时容器并没有真正启动而是创建了proxy
+       * */
       val newContainer = childFactory(context)
+
+      /**
+       * 将containerProxy记录到prewarmStartingPool中
+       * 在这里需要非常的注意这里创建的并没有放到prewarmPool中,而是等proxy将容器完全启动，并向pool发送NeedWork(data: PreWarmedData)消息
+       * 然后pool将其从prewarmStartingPool中移除然后添加到prewarmPool中
+       *
+       * prewarmPool中的容器都是PreWarmedData状态
+       *
+       * */
       prewarmStartingPool = prewarmStartingPool + (newContainer -> (exec.kind, memoryLimit))
+
+      /**
+       * 给containerProxy的FSM发送启动容器的event
+       * */
       newContainer ! Start(exec, memoryLimit, ttl)
     } else {
       logging.warn(
@@ -388,7 +490,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
         val coldStartKey = ColdStartKey(kind, memoryLimit)
         coldStartCount.get(coldStartKey) match {
           case Some(value) => coldStartCount = coldStartCount + (coldStartKey -> (value + 1))
-          case None        => coldStartCount = coldStartCount + (coldStartKey -> 1)
+          case None => coldStartCount = coldStartCount + (coldStartKey -> 1)
         }
       }
   }
@@ -408,20 +510,25 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       .sortBy(_._2.expires.getOrElse(now))
       .find {
         case (_, PreWarmedData(_, `kind`, `memory`, _, _)) => true
-        case _                                             => false
+        case _ => false
       }
       .map {
         case (ref, data) =>
           // Move the container to the usual pool
+          /**
+           * 把容器从prewarmedPool拿到freePool
+           * */
           freePool = freePool + (ref -> data)
           prewarmedPool = prewarmedPool - ref
           // Create a new prewarm container
           // NOTE: prewarming ignores the action code in exec, but this is dangerous as the field is accessible to the
           // factory
-
+          /**
+           * 这里非常关键，当一个预热的容器被被take之后，马上上创建一个新的pre容器
+           * */
           //get the appropriate ttl from prewarm configs
           val ttl =
-            prewarmConfig.find(pc => pc.memoryLimit == memory && pc.exec.kind == kind).flatMap(_.reactive.map(_.ttl))
+          prewarmConfig.find(pc => pc.memoryLimit == memory && pc.exec.kind == kind).flatMap(_.reactive.map(_.ttl))
           prewarmContainer(action.exec, memory, ttl)
           (ref, data)
       }
@@ -437,7 +544,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
   /**
    * Calculate if there is enough free memory within a given pool.
    *
-   * @param pool The pool, that has to be checked, if there is enough free memory.
+   * @param pool   The pool, that has to be checked, if there is enough free memory.
    * @param memory The amount of memory to check.
    * @return true, if there is enough space for the given amount of memory.
    */
@@ -495,9 +602,20 @@ object ContainerPool {
    * Returns None iff no matching container is in the idle pool.
    * Does not consider pre-warmed containers.
    *
-   * @param action the action to run
+   * 容器状态包括:
+   * - ContainerNotInUse--> def hasCapacity() = activeActivationCount < action.limits.concurrency.maxConcurrent
+   * NoData,表示冷（not running）容器的类型
+   * MemoryData,表示具有特定内存分配的冷（not running）容器的类型
+   * PreWarmedData,表示预热（running, but unused）的容器的类型（具有特定的内存分配）
+   *
+   * - ContainerInUse--> def hasCapacity() = true
+   * WarmingData,表示正在初始化的预热（running, but not used）容器的类型（用于特定action+调用名称空间）
+   * WarmingColdData，表示正在初始化的冷（not yet running）容器的类型（用于特定action+调用名称空间）
+   * WarmedData,表示已经使用的热容器的类型（用于特定action+调用名称空间）
+   *
+   * @param action              the action to run
    * @param invocationNamespace the namespace, that wants to run the action
-   * @param idles a map of idle containers, awaiting work
+   * @param idles               a map of idle containers, awaiting work
    * @return a container if one found
    */
   protected[containerpool] def schedule[A](action: ExecutableWhiskAction,
@@ -505,19 +623,19 @@ object ContainerPool {
                                            idles: Map[A, ContainerData]): Option[(A, ContainerData)] = {
     idles
       .find {
-        case (_, c @ WarmedData(_, `invocationNamespace`, `action`, _, _, _)) if c.hasCapacity() => true
-        case _                                                                                   => false
+        case (_, c@WarmedData(_, `invocationNamespace`, `action`, _, _, _)) if c.hasCapacity() => true
+        case _ => false
       }
       .orElse {
         idles.find {
-          case (_, c @ WarmingData(_, `invocationNamespace`, `action`, _, _)) if c.hasCapacity() => true
-          case _                                                                                 => false
+          case (_, c@WarmingData(_, `invocationNamespace`, `action`, _, _)) if c.hasCapacity() => true
+          case _ => false
         }
       }
       .orElse {
         idles.find {
-          case (_, c @ WarmingColdData(`invocationNamespace`, `action`, _, _)) if c.hasCapacity() => true
-          case _                                                                                  => false
+          case (_, c@WarmingColdData(`invocationNamespace`, `action`, _, _)) if c.hasCapacity() => true
+          case _ => false
         }
       }
   }
@@ -529,7 +647,7 @@ object ContainerPool {
    * NOTE: This method is never called to remove an action that is in the pool already,
    * since this would be picked up earlier in the scheduler and the container reused.
    *
-   * @param pool a map of all free containers in the pool
+   * @param pool   a map of all free containers in the pool
    * @param memory the amount of memory that has to be freed up
    * @return a list of containers to be removed iff found
    */
@@ -584,8 +702,8 @@ object ContainerPool {
             val expiredPrewarmedContainer = prewarmedPool.toSeq
               .filter { warmInfo =>
                 warmInfo match {
-                  case (_, p @ PreWarmedData(_, `kind`, `memory`, _, _)) if p.isExpired() => true
-                  case _                                                                  => false
+                  case (_, p@PreWarmedData(_, `kind`, `memory`, _, _)) if p.isExpired() => true
+                  case _ => false
                 }
               }
               .sortBy(_._2.expires.getOrElse(now))
@@ -616,6 +734,7 @@ object ContainerPool {
 
   /**
    * Find the increased number for the prewarmed kind
+   * 此函数用于计算当前正在运行的warmContainer，以及目标数目
    *
    * @param init
    * @param scheduled
@@ -632,14 +751,18 @@ object ContainerPool {
                        prewarmConfig: List[PrewarmingConfig],
                        prewarmedPool: Map[ActorRef, PreWarmedData],
                        prewarmStartingPool: Map[ActorRef, (String, ByteSize)])(
-    implicit logging: Logging): Map[PrewarmingConfig, (Int, Int)] = {
+                        implicit logging: Logging): Map[PrewarmingConfig, (Int, Int)] = {
     prewarmConfig.map { config =>
       val kind = config.exec.kind
       val memory = config.memoryLimit
-
+      /**
+       * 获取当前正在运行的rewarmedContainer的数目
+       * .count方法的参数是一个返回值类型是Boolean的函数，.count方法会遍历prewarmedPool，并将元素传入此函数，若返回值为true则cnt数目加1
+       * 这里函数使用了匹配模式，从而的到了类型为(kind,memory)的容器个数
+       * */
       val runningCount = prewarmedPool.count {
         // done starting (include expired, since they may not have been removed yet)
-        case (_, p @ PreWarmedData(_, `kind`, `memory`, _, _)) => true
+        case (_, p@PreWarmedData(_, `kind`, `memory`, _, _)) => true
         // started but not finished starting (or expired)
         case _ => false
       }

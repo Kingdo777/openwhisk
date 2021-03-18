@@ -122,6 +122,7 @@ trait Container {
     containerHttpMaxConcurrent = maxConcurrent
     containerHttpTimeout = timeout
     val body = JsObject("value" -> initializer)
+    System.out.println("KINGDO:(init body)"+body.toString)
     callContainer("/init", body, timeout, maxConcurrent, retry = true)
       .andThen { // never fails
         case Success(r: RunResult) =>
@@ -167,6 +168,7 @@ trait Container {
 
     val parameterWrapper = JsObject("value" -> parameters)
     val body = JsObject(parameterWrapper.fields ++ environment.fields)
+    System.out.println("KINGDO:(run  body)"+body.toString)
     callContainer("/run", body, timeout, maxConcurrent, retry = false, reschedule)
       .andThen { // never fails
         case Success(r: RunResult) =>

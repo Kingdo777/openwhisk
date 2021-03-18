@@ -52,12 +52,13 @@ object Invoker {
    *
    * This method is called after an activation has finished. The logs gathered here are stored along the activation
    * record in the database.
+   * 激活完成后将调用此方法。 此处收集的日志与激活记录一起存储在数据库中。
    *
-   * @param transid transaction the activation ran in
-   * @param user the user who ran the activation
+   * @param transid    transaction the activation ran in
+   * @param user       the user who ran the activation
    * @param activation the activation record
-   * @param container container used by the activation
-   * @param action action that was activated
+   * @param container  container used by the activation
+   * @param action     action that was activated
    * @return logs for the given activation
    */
   trait LogsCollector {
@@ -70,6 +71,7 @@ object Invoker {
               action: ExecutableWhiskAction): Future[ActivationLogs]
   }
 
+  /** protocol: http * */
   protected val protocol = loadConfigOrThrow[String]("whisk.invoker.protocol")
 
   /**
@@ -95,9 +97,28 @@ object Invoker {
     implicit val actorSystem: ActorSystem =
       ActorSystem(name = "invoker-actor-system", defaultExecutionContext = Some(ec))
     implicit val logger = new AkkaLogging(akka.event.Logging.getLogger(actorSystem, this))
+    /**
+     * container-pool {
+     * user-memory: 1024 m  我以为内存的大小是动态检测的，弄了半天是自定义的？？？？
+     * concurrent-peek-factor: 0.5 #factor used to limit message peeking: 0 < factor <= 1.0 - larger number improves concurrent processing, but increases risk of message loss during invoker crash
+     * akka-client:  false # if true, use PoolingContainerClient for HTTP from invoker to action container (otherwise use ApacheBlockingContainerClient)
+     * prewarm-expiration-check-interval: 1 minute # period to check for prewarm expiration
+     * prewarm-expiration-check-interval-variance: 10 seconds # varies expiration across invokers to avoid many concurrent expirations
+     * prewarm-expiration-limit: 100 # number of prewarms to expire in one expiration cycle (remaining expired will be considered for expiration in next cycle)
+     * }
+     * */
     val poolConfig: ContainerPoolConfig = loadConfigOrThrow[ContainerPoolConfig](ConfigKeys.containerPool)
+    /**
+     * # action concurrency-limit configuration
+     * concurrency-limit {
+     * min = 1
+     * max = 1
+     * std = 1
+     * }
+     * */
     val limitConfig: ConcurrencyLimitConfig = loadConfigOrThrow[ConcurrencyLimitConfig](ConfigKeys.concurrencyLimit)
 
+    /** Kamon 是一组用于监控运行在 JVM 上的应用的工具和框架 * */
     // Prepare Kamon shutdown
     CoordinatedShutdown(actorSystem).addTask(CoordinatedShutdown.PhaseActorSystemTerminate, "shutdownKamon") { () =>
       logger.info(this, s"Shutting down Kamon with coordinated shutdown")
@@ -113,11 +134,11 @@ object Invoker {
       Await.result(actorSystem.whenTerminated, 30.seconds)
       sys.exit(1)
     }
-
+    /** 下面两个命令都是在验证config的准确性 * */
+    //判断requiredProperties中的参数是否已经被设置，这些参数需要在环境变量中配置，见docker-compose的环境变量文件
     if (!config.isValid) {
       abort("Bad configuration, cannot start.")
     }
-
     val execManifest = ExecManifest.initialize(config)
     if (execManifest.isFailure) {
       logger.error(this, s"Invalid runtimes manifest: ${execManifest.failed.get}")
@@ -130,6 +151,12 @@ object Invoker {
       if (trimmed.nonEmpty) Some(trimmed) else None
     }
 
+
+    /**
+     * 这里是进行invoker的参数解析，才docker-compose的yaml文件中，启动invoker的命令是：
+     *  command: /bin/sh -c "exec /init.sh --id 0 >> /logs/invoker-local_logs.log 2>&1"
+     * 因此这里会解析(parse)这一个参数，也就是invoker的ID
+     */
     // process command line arguments
     // We accept the command line grammar of:
     // Usage: invoker [options] [<proposedInvokerId>]
@@ -149,9 +176,10 @@ object Invoker {
         case "--overwriteId" :: overwriteId :: tail if Try(overwriteId.toInt).isSuccess =>
           parse(tail, c.copy(overwriteId = Some(overwriteId.toInt)))
         case Nil => c
-        case _   => abort(s"Error processing command line arguments $ls")
+        case _ => abort(s"Error processing command line arguments $ls")
       }
     }
+
     val cmdLineArgs = parse(args.toList, CmdLineArgs())
     logger.info(this, "Command line arguments parsed to yield " + cmdLineArgs)
 
@@ -172,22 +200,27 @@ object Invoker {
     }
 
     initKamon(assignedInvokerId)
-
+    /** 构建topic **/
     val topicBaseName = "invoker"
     val topicName = topicBaseName + assignedInvokerId
-
+    /** 这里是Activation消息的大小 为1MB多一点 **/
     val maxMessageBytes = Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT)
+    /** 创建Instance实例，这里的userMemory是什么意思暂时不清楚 **/
     val invokerInstance =
       InvokerInstanceId(assignedInvokerId, cmdLineArgs.uniqueName, cmdLineArgs.displayedName, poolConfig.userMemory)
 
     val msgProvider = SpiLoader.get[MessagingProvider]
     if (msgProvider
-          .ensureTopic(config, topic = topicName, topicConfig = topicBaseName, maxMessageBytes = maxMessageBytes)
-          .isFailure) {
+      .ensureTopic(config, topic = topicName, topicConfig = topicBaseName, maxMessageBytes = maxMessageBytes)
+      .isFailure) {
       abort(s"failure during msgProvider.ensureTopic for topic $topicName")
     }
-
+    /** 消息发送器 **/
     val producer = msgProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
+    /**
+     * 根据配置文件common/scala/src/main/resources/reference.conf，trait InvokerProvider是由InvokerReactive实现,当然也只有这一个实现
+     * 此函数最终返回了一个InvokerReactive对象
+     * */
     val invoker = try {
       SpiLoader.get[InvokerProvider].instance(config, invokerInstance, producer, poolConfig, limitConfig)
     } catch {
@@ -225,11 +258,11 @@ trait InvokerCore {}
  */
 trait InvokerServerProvider extends Spi {
   def instance(
-    invoker: InvokerCore)(implicit ec: ExecutionContext, actorSystem: ActorSystem, logger: Logging): BasicRasService
+                invoker: InvokerCore)(implicit ec: ExecutionContext, actorSystem: ActorSystem, logger: Logging): BasicRasService
 }
 
 object DefaultInvokerServer extends InvokerServerProvider {
   override def instance(
-    invoker: InvokerCore)(implicit ec: ExecutionContext, actorSystem: ActorSystem, logger: Logging): BasicRasService =
+                         invoker: InvokerCore)(implicit ec: ExecutionContext, actorSystem: ActorSystem, logger: Logging): BasicRasService =
     new BasicRasService {}
 }

@@ -152,6 +152,14 @@ class InvokerReactive(
       ContainerProxy
         .props(containerFactory.createContainer, ack, store, collectLogs, instance, poolConfig))
 
+  /**
+   * 当前配置文件得到的配置如下：
+   * PrewarmingConfig(2,{"kind":"nodejs:10","code":"","binary":false},256 MB,None)
+   * initialCount=2
+   * exec={"kind":"nodejs:10","code":"","binary":false}
+   * memoryLimit=256MB
+   * reactive=None
+   * */
   val prewarmingConfigs: List[PrewarmingConfig] = {
     ExecManifest.runtimesManifest.stemcells.flatMap {
       case (mf, cells) =>
@@ -160,7 +168,7 @@ class InvokerReactive(
         }
     }.toList
   }
-
+  /** containerPool **/
   private val pool =
     actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs))
 
@@ -182,6 +190,10 @@ class InvokerReactive(
       .flatMap(action => {
         action.toExecutableWhiskAction match {
           case Some(executable) =>
+            /**
+             * 在这个地方源代码已经从DB中取出
+             * */
+            System.out.println("KINGDO:(executable.exec.code)"+executable.exec.code.toString)
             pool ! Run(executable, msg)
             Future.successful(())
           case None =>
