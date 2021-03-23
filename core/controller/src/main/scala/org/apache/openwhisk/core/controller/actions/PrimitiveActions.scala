@@ -60,8 +60,8 @@ protected[actions] trait PrimitiveActions {
   protected implicit val logging: Logging
 
   /**
-   *  The index of the active ack topic, this controller is listening for.
-   *  Typically this is also the instance number of the controller
+   * The index of the active ack topic, this controller is listening for.
+   * Typically this is also the instance number of the controller
    */
   protected val activeAckTopicIndex: ControllerInstanceId
 
@@ -77,14 +77,14 @@ protected[actions] trait PrimitiveActions {
 
   /** A method that knows how to invoke a sequence of actions. */
   protected[actions] def invokeSequence(
-    user: Identity,
-    action: WhiskActionMetaData,
-    components: Vector[FullyQualifiedEntityName],
-    payload: Option[JsObject],
-    waitForOutermostResponse: Option[FiniteDuration],
-    cause: Option[ActivationId],
-    topmost: Boolean,
-    atomicActionsCount: Int)(implicit transid: TransactionId): Future[(Either[ActivationId, WhiskActivation], Int)]
+                                         user: Identity,
+                                         action: WhiskActionMetaData,
+                                         components: Vector[FullyQualifiedEntityName],
+                                         payload: Option[JsObject],
+                                         waitForOutermostResponse: Option[FiniteDuration],
+                                         cause: Option[ActivationId],
+                                         topmost: Boolean,
+                                         atomicActionsCount: Int)(implicit transid: TransactionId): Future[(Either[ActivationId, WhiskActivation], Int)]
 
   /**
    * A method that knows how to invoke a single primitive action or a composition.
@@ -107,11 +107,11 @@ protected[actions] trait PrimitiveActions {
    * The activation record for a composition also includes a specific annotation "conductor" with value true.
    */
   protected[actions] def invokeSingleAction(
-    user: Identity,
-    action: ExecutableWhiskActionMetaData,
-    payload: Option[JsObject],
-    waitForResponse: Option[FiniteDuration],
-    cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
+                                             user: Identity,
+                                             action: ExecutableWhiskActionMetaData,
+                                             payload: Option[JsObject],
+                                             waitForResponse: Option[FiniteDuration],
+                                             cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
 
     if (action.annotations.isTruthy(WhiskActivation.conductorAnnotation)) {
       invokeComposition(user, action, payload, waitForResponse, cause)
@@ -137,24 +137,24 @@ protected[actions] trait PrimitiveActions {
    * For actions that are enclosed in a composition and are activated as a result of the composition activation,
    * the cause contains the activation id of the immediately enclosing composition.
    *
-   * @param user the identity invoking the action
-   * @param action the action to invoke
-   * @param payload the dynamic arguments for the activation
+   * @param user            the identity invoking the action
+   * @param action          the action to invoke
+   * @param payload         the dynamic arguments for the activation
    * @param waitForResponse if not empty, wait upto specified duration for a response (this is used for blocking activations)
-   * @param cause the activation id that is responsible for this invoke/activation
-   * @param transid a transaction id for logging
+   * @param cause           the activation id that is responsible for this invoke/activation
+   * @param transid         a transaction id for logging
    * @return a promise that completes with one of the following successful cases:
-   *            Right(WhiskActivation) if waiting for a response and response is ready within allowed duration,
-   *            Left(ActivationId) if not waiting for a response, or allowed duration has elapsed without a result ready
+   *         Right(WhiskActivation) if waiting for a response and response is ready within allowed duration,
+   *         Left(ActivationId) if not waiting for a response, or allowed duration has elapsed without a result ready
    *         or these custom failures:
-   *            RequestEntityTooLarge if the message is too large to to post to the message bus
+   *         RequestEntityTooLarge if the message is too large to to post to the message bus
    */
   private def invokeSimpleAction(
-    user: Identity,
-    action: ExecutableWhiskActionMetaData,
-    payload: Option[JsObject],
-    waitForResponse: Option[FiniteDuration],
-    cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
+                                  user: Identity,
+                                  action: ExecutableWhiskActionMetaData,
+                                  payload: Option[JsObject],
+                                  waitForResponse: Option[FiniteDuration],
+                                  cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
 
     // merge package parameters with action (action parameters supersede), then merge in payload
     val args = action.parameters merge payload
@@ -182,7 +182,10 @@ protected[actions] trait PrimitiveActions {
       action.parameters.lockedParameters(payload.map(_.fields.keySet).getOrElse(Set.empty)),
       cause = cause,
       WhiskTracerProvider.tracer.getTraceContext(transid))
-
+    System.out.println("KINGDO-TIME-RECODE ### call publish ### " +
+      System.currentTimeMillis().toString +
+      s" ### ${activationId}" +
+      s" ### ${action.name}")
     val postedFuture = loadBalancer.publish(action, message)
 
     postedFuture andThen {
@@ -201,7 +204,15 @@ protected[actions] trait PrimitiveActions {
           Future.successful(Left(message.activationId))
         }
     } andThen {
-      case Success(_) => transid.finished(this, startActivation)
+      case Success(_) => {
+        transid.finished(this, startActivation)
+        //action执行结束
+        System.out.println("KINGDO-TIME-RECODE ### result back to LB ### " +
+          System.currentTimeMillis().toString +
+          s" ### ${message.activationId}" +
+          s" ### ${message.action.name}"
+        )
+      }
       case Failure(e) => transid.failed(this, startActivation, e.getMessage)
     }
   }
@@ -230,16 +241,16 @@ protected[actions] trait PrimitiveActions {
    * The session object is not shared between callers and callees.
    *
    * @param activationId the activationId for the composition (ie the activation record for the composition)
-   * @param start the start time for the composition
-   * @param action the conductor action responsible for the execution of the composition
-   * @param cause the cause of the composition (activationId of the enclosing sequence or composition if any)
-   * @param duration the "user" time so far executing the composition (sum of durations for
-   *        all actions invoked so far which is different from the total time spent executing the composition)
-   * @param maxMemory the maximum memory annotation observed so far for the conductor action and components
-   * @param state the json state object to inject in the parameter object of the next conductor invocation
-   * @param accounting the global accounting object used to abort compositions requiring too many action invocations
-   * @param logs a mutable buffer that is appended with new activation ids as the composition unfolds
-   *             (in contrast with sequences, the logs of a hierarchy of compositions is not flattened)
+   * @param start        the start time for the composition
+   * @param action       the conductor action responsible for the execution of the composition
+   * @param cause        the cause of the composition (activationId of the enclosing sequence or composition if any)
+   * @param duration     the "user" time so far executing the composition (sum of durations for
+   *                     all actions invoked so far which is different from the total time spent executing the composition)
+   * @param maxMemory    the maximum memory annotation observed so far for the conductor action and components
+   * @param state        the json state object to inject in the parameter object of the next conductor invocation
+   * @param accounting   the global accounting object used to abort compositions requiring too many action invocations
+   * @param logs         a mutable buffer that is appended with new activation ids as the composition unfolds
+   *                     (in contrast with sequences, the logs of a hierarchy of compositions is not flattened)
    */
   private case class Session(activationId: ActivationId,
                              start: Instant,
@@ -258,16 +269,16 @@ protected[actions] trait PrimitiveActions {
    * It waits for the activation response, synthesizes the activation record and writes it to the datastore.
    * It distinguishes nested, blocking and non-blocking invokes, returning either the activation or the activation id.
    *
-   * @param user the identity invoking the action
-   * @param action the conductor action to invoke for the composition
-   * @param payload the dynamic arguments for the activation
+   * @param user            the identity invoking the action
+   * @param action          the conductor action to invoke for the composition
+   * @param payload         the dynamic arguments for the activation
    * @param waitForResponse if not empty, wait upto specified duration for a response (this is used for blocking activations)
-   * @param cause the activation id that is responsible for this invoke/activation
-   * @param accounting the accounting object for the caller if any
-   * @param transid a transaction id for logging
+   * @param cause           the activation id that is responsible for this invoke/activation
+   * @param accounting      the accounting object for the caller if any
+   * @param transid         a transaction id for logging
    * @return a promise that completes with one of the following successful cases:
-   *            Right(WhiskActivation) if waiting for a response and response is ready within allowed duration,
-   *            Left(ActivationId) if not waiting for a response, or allowed duration has elapsed without a result ready
+   *         Right(WhiskActivation) if waiting for a response and response is ready within allowed duration,
+   *         Left(ActivationId) if not waiting for a response, or allowed duration has elapsed without a result ready
    */
   private def invokeComposition(user: Identity,
                                 action: ExecutableWhiskActionMetaData,
@@ -275,7 +286,7 @@ protected[actions] trait PrimitiveActions {
                                 waitForResponse: Option[FiniteDuration],
                                 cause: Option[ActivationId],
                                 accounting: Option[CompositionAccounting] = None)(
-    implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
+                                 implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
 
     val session = Session(
       activationId = activationIdFactory.make(),
@@ -313,9 +324,9 @@ protected[actions] trait PrimitiveActions {
    * It either invokes the desired component action or completes the composition invocation.
    * It also checks the invocation counts against the limits.
    *
-   * @param user the identity invoking the action
-   * @param payload the dynamic arguments for the activation
-   * @param session the session object for this composition
+   * @param user      the identity invoking the action
+   * @param payload   the dynamic arguments for the activation
+   * @param session   the session object for this composition
    * @param parentTid a parent transaction id
    */
   private def invokeConductor(user: Identity,
@@ -353,13 +364,13 @@ protected[actions] trait PrimitiveActions {
           // extract params from result, auto boxing result if not a dictionary
           val params = result.fields.get(WhiskActivation.paramsField).map {
             case obj: JsObject => obj
-            case value         => JsObject(WhiskActivation.valueField -> value)
+            case value => JsObject(WhiskActivation.valueField -> value)
           }
 
           // update session state, auto boxing state if not a dictionary
           session.state = result.fields.get(WhiskActivation.stateField).map {
             case obj: JsObject => obj
-            case value         => JsObject(WhiskActivation.stateField -> value)
+            case value => JsObject(WhiskActivation.stateField -> value)
           }
 
           // extract next action from result and invoke
@@ -396,9 +407,9 @@ protected[actions] trait PrimitiveActions {
   /**
    * Checks if the user is entitled to invoke the next action and invokes it.
    *
-   * @param user the subject
-   * @param fqn the name of the action
-   * @param params parameters for the action
+   * @param user    the subject
+   * @param fqn     the name of the action
+   * @param params  parameters for the action
    * @param session the session for the current activation
    * @return promise for the eventual activation
    */
@@ -449,8 +460,8 @@ protected[actions] trait PrimitiveActions {
    * This method distinguishes primitive actions, sequences, and compositions.
    * The conductor action is reinvoked after the successful invocation of the component.
    *
-   * @param user the identity invoking the action
-   * @param action the component action to invoke
+   * @param user    the identity invoking the action
+   * @param action  the component action to invoke
    * @param payload the dynamic arguments for the activation
    * @param session the session object for this composition
    * @param transid a transaction id for logging
@@ -505,15 +516,15 @@ protected[actions] trait PrimitiveActions {
    * Logs the activation id and updates the duration and max memory for the session.
    * Returns the activation record if successful, the error response if not.
    *
-   * @param user the identity invoking the action
-   * @param session the session object for this composition
+   * @param user               the identity invoking the action
+   * @param session            the session object for this composition
    * @param activationResponse the future activation to wait on
-   * @param transid a transaction id for logging
+   * @param transid            a transaction id for logging
    */
   private def waitForActivation(user: Identity,
                                 session: Session,
                                 activationResponse: Future[Either[ActivationId, WhiskActivation]])(
-    implicit transid: TransactionId): Future[Either[ActivationResponse, WhiskActivation]] = {
+                                 implicit transid: TransactionId): Future[Either[ActivationResponse, WhiskActivation]] = {
 
     activationResponse
       .map {
@@ -596,7 +607,7 @@ protected[actions] trait PrimitiveActions {
     if (UserEvents.enabled) {
       EventMessage.from(activation, s"controller${activeAckTopicIndex.asString}", user.namespace.uuid) match {
         case Success(msg) => UserEvents.send(producer, msg)
-        case Failure(t)   => logging.warn(this, s"activation event was not sent: $t")
+        case Failure(t) => logging.warn(this, s"activation event was not sent: $t")
       }
     }
 
@@ -618,7 +629,7 @@ protected[actions] trait PrimitiveActions {
                                         activationId: ActivationId,
                                         totalWaitTime: FiniteDuration,
                                         activeAckResponse: Future[Either[ActivationId, WhiskActivation]])(
-    implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
+                                         implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
     val context = UserContext(user)
     val result = Promise[Either[ActivationId, WhiskActivation]]
     val docid = new DocId(WhiskEntity.qualifiedName(user.namespace.name.toPath, activationId))
@@ -653,7 +664,7 @@ protected[actions] trait PrimitiveActions {
    * Does not use Future composition because an early exit is wanted, once any possible external source resolved the
    * Promise.
    *
-   * @param docid the docid to poll for
+   * @param docid  the docid to poll for
    * @param result promise to resolve on result. Is also used to abort polling once completed.
    */
   private def pollActivation(docid: DocId,
@@ -673,7 +684,7 @@ protected[actions] trait PrimitiveActions {
               logLevel = InfoLevel)
             result.trySuccess(Right(activation.withoutLogs))
           case Failure(_: NoDocumentException) => pollActivation(docid, context, result, wait, retries + 1, maxRetries)
-          case Failure(t: Throwable)           => result.tryFailure(t)
+          case Failure(t: Throwable) => result.tryFailure(t)
         }
       }
 

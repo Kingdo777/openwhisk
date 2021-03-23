@@ -280,8 +280,10 @@ case object RunCompleted
  * @param factory         a function generating a Container
  * @param sendActiveAck   a function sending the activation via active ack
  * @param storeActivation a function storing the activation in a persistent store
- * @param unusedTimeout   time after which the container is automatically thrown away
- * @param pauseGrace      time to wait for new work before pausing the container
+ * @param unusedTimeout   time after which the container is automatically thrown away,此参数用于设置，进入paused状态的容器多久之后被删除
+ * @param pauseGrace      time to wait for new work before pausing the container，此参数用于设置，ready状态的容器，多久之后进入paused状态
+ *                        上面两个参数均由配置文件中的timeout.idle-container和timeout.pause-grace两个参数决定，默认是10m和50ms
+ *
  */
 class ContainerProxy(factory: (TransactionId,
   String,
@@ -594,6 +596,11 @@ class ContainerProxy(factory: (TransactionId,
       implicit val transid = job.msg.transid
       activeCount += 1
       val newData = data.withResumeRun(job)
+      System.out.println("KINGDO-TIME-RECODE ### call resume ### " +
+        System.currentTimeMillis().toString +
+        s" ### ${job.msg.activationId}" +
+        s" ### ${job.msg.action.name}"
+      )
       data.container
         .resume()
         .andThen {
@@ -863,7 +870,11 @@ class ContainerProxy(factory: (TransactionId,
           "deadline" -> (Instant.now.toEpochMilli + actionTimeout.toMillis).toString.toJson)) map {
           case (key, value) => "__OW_" + key.toUpperCase -> value
         }
-
+        System.out.println("KINGDO-TIME-RECODE ### call init ### " +
+          System.currentTimeMillis().toString +
+          s" ### ${job.msg.activationId}" +
+          s" ### ${job.msg.action.name}"
+        )
         container
           .initialize(
             job.action.containerInitializer(env ++ owEnv),
@@ -884,7 +895,10 @@ class ContainerProxy(factory: (TransactionId,
           // compute deadline on invoker side avoids discrepancies inside container
           // but potentially under-estimates actual deadline
           "deadline" -> (Instant.now.toEpochMilli + actionTimeout.toMillis).toString.toJson)
-
+        System.out.println("KINGDO-TIME-RECODE ### call run ### " +
+          System.currentTimeMillis().toString +
+          s" ### ${job.msg.activationId}" +
+          s" ### ${job.msg.action.name}")
         container
           .run(
             parameters,
@@ -934,6 +948,10 @@ class ContainerProxy(factory: (TransactionId,
         val msg =
           if (splitAckMessagesPendingLogCollection) ResultMessage(tid, result)
           else CombinedCompletionAndResultMessage(tid, result, instance)
+        System.out.println("KINGDO-TIME-RECODE ### get result ### " +
+          System.currentTimeMillis().toString +
+          s" ### ${job.msg.activationId}" +
+          s" ### ${job.msg.action.name}")
         sendActiveAck(tid, result, job.msg.blocking, job.msg.rootControllerIndex, job.msg.user.namespace.uuid, msg)
       }
     } else {

@@ -184,8 +184,10 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
         val createdContainer: Option[((ActorRef, ContainerData), String)] =
         // Schedule a job to a warm container
           ContainerPool
+
             /** schedule 方法是从freePool中依次查找warmed, warming, and warmingCold这三种类型的容器，找到其中拥有并发资源的容器 * */
             .schedule(r.action, r.msg.user.namespace.name, freePool)
+
             /** 如果能找到的话就直接返回 * */
             .map(container => (container, container._2.initingState)) //warmed, warming, and warmingCold always know their state
             /** 否则的话就寻找预热的容器，看看是否存在可用的 * */
@@ -200,7 +202,13 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
                    * */
                   // Is there enough space to create a new container or do other containers have to be removed?
                   if (hasPoolSpaceFor(busyPool ++ freePool ++ prewarmedPool, prewarmStartingPool, memory)) {
+                    System.out.println("KINGDO-TIME-RECODE ### call createContainer ### " +
+                      System.currentTimeMillis().toString +
+                      s" ### ${r.msg.activationId}" +
+                      s" ### ${r.msg.action.name}"
+                    )
                     val container = Some(createContainer(memory), "cold")
+
                     /** 记录一次冷启动，用于preContainer的数目调整 * */
                     incrementColdStartCount(kind, memory)
                     container
@@ -218,6 +226,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
                  * 移除的容器的类型只能是WarmedData类型，而且是根据LRU策略进行移除的
                  * */
                 .remove(freePool, Math.min(r.action.limits.memory.megabytes, memoryConsumptionOf(freePool)).MB)
+
                 /**
                  * 将容器逐一删除，并将其从freepool和busypool中同时删除
                  * */
@@ -229,6 +238,11 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
                   takePrewarmContainer(r.action)
                     .map(container => (container, "recreatedPrewarm"))
                     .getOrElse {
+                      System.out.println("KINGDO-TIME-RECODE ### call createContainer ### " +
+                        System.currentTimeMillis().toString +
+                        s" ### ${r.msg.activationId}" +
+                        s" ### ${r.msg.action.name}"
+                      )
                       val container = (createContainer(memory), "recreated")
                       incrementColdStartCount(kind, memory)
                       container
@@ -362,7 +376,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
         adjustPrewarmedContainer(false, false) //in case a prewarm is removed due to health failure or crash
       }
 
-     // This message is received for one of these reasons:
+    // This message is received for one of these reasons:
     // 1. Container errored while resuming a warm container, could not process the job, and sent the job back
     // 2. The container aged, is destroying itself, and was assigned a job which it had to send back
     // 3. The container aged and is destroying itself
@@ -442,7 +456,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
 
   /** Creates a new container and updates state accordingly. */
   /**
-   *  只能创建MemoryData类型的容器，而且此时的容器是没有启动的
+   * 只能创建MemoryData类型的容器，而且此时的容器是没有启动的
    * */
   def createContainer(memoryLimit: ByteSize): (ActorRef, ContainerData) = {
     val ref = childFactory(context)

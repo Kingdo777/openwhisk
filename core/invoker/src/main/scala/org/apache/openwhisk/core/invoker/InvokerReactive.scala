@@ -47,24 +47,24 @@ import scala.util.{Failure, Success}
 object InvokerReactive extends InvokerProvider {
 
   override def instance(
-    config: WhiskConfig,
-    instance: InvokerInstanceId,
-    producer: MessageProducer,
-    poolConfig: ContainerPoolConfig,
-    limitsConfig: ConcurrencyLimitConfig)(implicit actorSystem: ActorSystem, logging: Logging): InvokerCore =
+                         config: WhiskConfig,
+                         instance: InvokerInstanceId,
+                         producer: MessageProducer,
+                         poolConfig: ContainerPoolConfig,
+                         limitsConfig: ConcurrencyLimitConfig)(implicit actorSystem: ActorSystem, logging: Logging): InvokerCore =
     new InvokerReactive(config, instance, producer, poolConfig, limitsConfig)
 
 }
 
 class InvokerReactive(
-  config: WhiskConfig,
-  instance: InvokerInstanceId,
-  producer: MessageProducer,
-  poolConfig: ContainerPoolConfig = loadConfigOrThrow[ContainerPoolConfig](ConfigKeys.containerPool),
-  limitsConfig: ConcurrencyLimitConfig = loadConfigOrThrow[ConcurrencyLimitConfig](ConfigKeys.concurrencyLimit))(
-  implicit actorSystem: ActorSystem,
-  logging: Logging)
-    extends InvokerCore {
+                       config: WhiskConfig,
+                       instance: InvokerInstanceId,
+                       producer: MessageProducer,
+                       poolConfig: ContainerPoolConfig = loadConfigOrThrow[ContainerPoolConfig](ConfigKeys.containerPool),
+                       limitsConfig: ConcurrencyLimitConfig = loadConfigOrThrow[ConcurrencyLimitConfig](ConfigKeys.concurrencyLimit))(
+                       implicit actorSystem: ActorSystem,
+                       logging: Logging)
+  extends InvokerCore {
 
   implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val ec: ExecutionContext = actorSystem.dispatcher
@@ -113,7 +113,7 @@ class InvokerReactive(
     logging.debug(this, "running background job to update blacklist")
     namespaceBlacklist.refreshBlacklist()(ec, TransactionId.invoker).andThen {
       case Success(set) => logging.info(this, s"updated blacklist to ${set.size} entries")
-      case Failure(t)   => logging.error(this, s"error on updating the blacklist: ${t.getMessage}")
+      case Failure(t) => logging.error(this, s"error on updating the blacklist: ${t.getMessage}")
     }
   }
 
@@ -168,7 +168,7 @@ class InvokerReactive(
         }
     }.toList
   }
-  /** containerPool **/
+  /** containerPool * */
   private val pool =
     actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs))
 
@@ -190,10 +190,11 @@ class InvokerReactive(
       .flatMap(action => {
         action.toExecutableWhiskAction match {
           case Some(executable) =>
+
             /**
              * 在这个地方源代码已经从DB中取出
              * */
-            System.out.println("KINGDO:(executable.exec.code)"+executable.exec.code.toString)
+            //            System.out.println("KINGDO:(executable.exec.code)"+executable.exec.code.toString)
             pool ! Run(executable, msg)
             Future.successful(())
           case None =>
@@ -238,7 +239,10 @@ class InvokerReactive(
       .flatMap { msg =>
         // The message has been parsed correctly, thus the following code needs to *always* produce at least an
         // active-ack.
-
+        System.out.println("KINGDO-TIME-RECODE ### receive from LB ### " +
+          System.currentTimeMillis().toString +
+          s" ### ${msg.activationId}" +
+          s" ### ${msg.action.name} ")
         implicit val transid: TransactionId = msg.transid
 
         //set trace context to continue tracing

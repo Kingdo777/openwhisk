@@ -302,8 +302,8 @@ class ShardingContainerPoolBalancer(
   /** 这里是实现了trait LoadBalancer中的publish方法 */
   override def publish(action: ExecutableWhiskActionMetaData, msg: ActivationMessage)(
     implicit transid: TransactionId): Future[Future[Either[ActivationId, WhiskActivation]]] = {
-    logging.info(this, "KINGDO: publish")
-    logging.info(this, "KINGDO" + schedulingState.toString)
+    //    logging.info(this, "KINGDO: publish")
+    //    logging.info(this, "KINGDO" + schedulingState.toString)
 
     //action.exec.pull表示是否需要注册表中的容器映像来执行action，也就是否是blackbox，即用户自定义镜像
     val isBlackboxInvocation = action.exec.pull
@@ -368,21 +368,24 @@ class ShardingContainerPoolBalancer(
           s"scheduled activation ${msg.activationId}, action '${msg.action.asString}' ($actionType), ns '${msg.user.namespace.name.asString}', mem limit ${memoryLimit.megabytes} MB (${memoryLimitInfo}), time limit ${timeLimit.duration.toMillis} ms (${timeLimitInfo}) to ${invoker}")
 
         /**
-         *  设置activationSlots、activationPromises以记录action的调用信息
-         *  返回值就是publish的返回值
-         *  就是添加了ack超时的定时器
+         * 设置activationSlots、activationPromises以记录action的调用信息
+         * 返回值就是publish的返回值
+         * 就是添加了ack超时的定时器
          * */
         val activationResult = setupActivation(msg, action, invoker)
+
         /**
          * 一层层向上找，可以知道发送消息的接口是由KafkaMessagingProvider实现的
          * 这里解释把msg直接推到invoker的订阅上，接下来就是invoker接受到消息了
          * */
         /**
-         * 需要注意的是在这里我们将给出publish的返回值，返回值类型是 Future[ Future[ Either[ActivationId, WhiskActivation] ] ],这是一个组合的Future，
-         * 也就是内部的Future返回后，外部的Future才可能返回
-         * 这里直接使用了map进行组内，
-         *    外面的Future就是send的返回值Future[RecordMetadata]，这个
-         *    里面的Future是activationResult，类型是Future[ Either[ActivationId, WhiskActivation] ]
+         * 需要注意的是在这里我们将给出publish的返回值，返回值类型是 Future[ Future[ Either[ActivationId, WhiskActivation] ] ]
+         * sendActivationToInvoker用于发送一个调用消息，其返回一个Future结果，一旦次Future成功的回调，那么send操作完成，这一操作是很快完成的，
+         * 一旦send操作完成，其结果是什么并不重要（因此为send函数内部已经进行了处理），此时就会执行map中的操作，此操作是基于send的Future结果的，显然这个结果不重要，
+         * 因此是 "_ => {}" map操作将返回一个新的future，在这里就是activationResult。从而构成了这个嵌套的Future
+
+         * 外面的Future就是send的返回值Future[RecordMetadata]，这个
+         * 里面的Future是activationResult，类型是Future[ Either[ActivationId, WhiskActivation] ]
          * 需要知道这两个都是由Promise产生的，外面的是只要send操作完成就会，Future就有效了，里面的只能等到结果返回（如果是非阻塞调用，那么也是立即返回的）
          * */
         sendActivationToInvoker(messageProducer, msg, invoker).map(_ => activationResult)
