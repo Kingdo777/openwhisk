@@ -530,6 +530,8 @@ class ContainerProxy(factory: (TransactionId,
         case ActivationUnsuccessfulError(r) => Some(r.response)
         case _ => None
       }
+      logging.info(this,"KINGDO ### sleep 5min before destroy error container")
+      Thread.sleep(1000*300)
       destroyContainer(data, true, true, r)
 
     // Failed for a subsequent /run
@@ -841,6 +843,7 @@ class ContainerProxy(factory: (TransactionId,
      * action的执行超时时间
      * */
     val actionTimeout = job.action.limits.timeout.duration
+    System.out.println("###########KINGDO-KINGDO" + actionTimeout.toString())
     val unlockedArgs =
       ContainerProxy.unlockArguments(job.msg.content, job.msg.lockedArgs, ParameterEncryption.singleton)
 

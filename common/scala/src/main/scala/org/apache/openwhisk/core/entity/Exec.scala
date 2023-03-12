@@ -230,8 +230,10 @@ protected[core] case class SequenceExecMetaData(components: Vector[FullyQualifie
 
 object Exec extends ArgNormalizer[Exec] with DefaultJsonProtocol {
 
-  val maxSize: ByteSize = 48.MB
+//  val maxSize: ByteSize = 48.MB
+  val maxSize: ByteSize = 512.MB
   val sizeLimit = loadConfigOrThrow[ByteSize](ConfigKeys.execSizeLimit)
+  System.out.println("###########KINGDO-KINGDO, maxSize:" + maxSize +", sizeLimit:" + sizeLimit)
 
   require(
     sizeLimit <= maxSize,

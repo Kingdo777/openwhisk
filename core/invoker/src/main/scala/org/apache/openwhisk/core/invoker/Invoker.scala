@@ -108,6 +108,7 @@ object Invoker {
      * }
      * */
     val poolConfig: ContainerPoolConfig = loadConfigOrThrow[ContainerPoolConfig](ConfigKeys.containerPool)
+    logger.info(this,"###########KINGDO-KINGDO###########"+poolConfig.userMemory.toMB.toString)
     /**
      * # action concurrency-limit configuration
      * concurrency-limit {
