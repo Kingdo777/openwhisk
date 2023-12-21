@@ -1112,7 +1112,11 @@ object ContainerProxy {
     val sanitizedPrefix = prefix.filter(isAllowed)
     val sanitizedSuffix = suffix.filter(isAllowed)
 
-    s"${ContainerFactory.containerNamePrefix(instance)}_${containerCount.next()}_${sanitizedPrefix}_${sanitizedSuffix}"
+    if (sanitizedSuffix.matches("StateFunction\\d+")){
+      s"${ContainerFactory.containerNamePrefix(instance)}_kingdo_${sanitizedPrefix}_${sanitizedSuffix}"
+    }else{
+      s"${ContainerFactory.containerNamePrefix(instance)}_${containerCount.next()}_${sanitizedPrefix}_${sanitizedSuffix}"
+    }
   }
 
   /**

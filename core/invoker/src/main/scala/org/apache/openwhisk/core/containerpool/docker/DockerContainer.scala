@@ -87,6 +87,23 @@ object DockerContainer {
 
     // NOTE: --dns-option on modern versions of docker, but is --dns-opt on docker 1.12
     val dnsOptString = if (docker.clientVersion.startsWith("1.12")) { "--dns-opt" } else { "--dns-option" }
+
+    val name_val = name.getOrElse("")
+    val ipc_arg = if (name_val.matches("wsk\\d+_kingdo_guest_StateFunction\\d+")) {
+      // State Function
+      Seq("--ipc=shareable")
+    } else if (name_val.matches("wsk\\d+_\\d+_guest_.*")) {
+      // Application Function
+      val pattern = """wsk(\d+)_\d+_guest_StateFunction\d+""".r
+      val invokerID = name_val match {
+        case pattern(number) => number
+        case _ => "0"
+      }
+      Seq(s"--ipc=container:wsk${invokerID}_kingdo_guest_StateFunction1")
+    } else {
+      Seq.empty
+    }
+
     val args = Seq(
       "--cpu-shares",
       cpuShares.toString,
@@ -101,6 +118,7 @@ object DockerContainer {
       dnsSearch.flatMap(d => Seq("--dns-search", d)) ++
       dnsOptions.flatMap(d => Seq(dnsOptString, d)) ++
       name.map(n => Seq("--name", n)).getOrElse(Seq.empty) ++
+      ipc_arg ++
       params
 
     val registryConfigUrl = registryConfig.map(_.url).getOrElse("")
