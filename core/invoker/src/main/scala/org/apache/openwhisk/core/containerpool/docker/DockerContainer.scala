@@ -47,15 +47,15 @@ object DockerContainer {
   /**
    * Creates a container running on a docker daemon.
    *
-   * @param transid transaction creating the container
-   * @param image either a user provided (Left) or OpenWhisk provided (Right) image
-   * @param memory memorylimit of the container
-   * @param cpuShares sharefactor for the container
+   * @param transid     transaction creating the container
+   * @param image       either a user provided (Left) or OpenWhisk provided (Right) image
+   * @param memory      memorylimit of the container
+   * @param cpuShares   sharefactor for the container
    * @param environment environment variables to set on the container
-   * @param network network to launch the container in
-   * @param dnsServers list of dns servers to use in the container
-   * @param name optional name for the container
-   * @param useRunc use docker-runc to pause/unpause container?
+   * @param network     network to launch the container in
+   * @param dnsServers  list of dns servers to use in the container
+   * @param name        optional name for the container
+   * @param useRunc     use docker-runc to pause/unpause container?
    * @return a Future which either completes with a DockerContainer or one of two specific failures
    */
   def create(transid: TransactionId,
@@ -77,7 +77,7 @@ object DockerContainer {
                                                             log: Logging): Future[DockerContainer] = {
     implicit val tid: TransactionId = transid
 
-    val environmentArgs = environment.flatMap {
+    var environmentArgs = environment.flatMap {
       case (key, value) => Seq("-e", s"$key=$value")
     }
 
@@ -86,19 +86,29 @@ object DockerContainer {
     }
 
     // NOTE: --dns-option on modern versions of docker, but is --dns-opt on docker 1.12
-    val dnsOptString = if (docker.clientVersion.startsWith("1.12")) { "--dns-opt" } else { "--dns-option" }
+    val dnsOptString = if (docker.clientVersion.startsWith("1.12")) {
+      "--dns-opt"
+    } else {
+      "--dns-option"
+    }
 
     val name_val = name.getOrElse("")
     val ipc_arg = if (name_val.matches("wsk\\d+_kingdo_guest_StateFunction\\d+")) {
       // State Function
+      environmentArgs = environmentArgs ++
+        Seq("-e", s"__OW_FUNCTION_TYPE=state-function") ++
+        Seq("-e", s"__OW_ACTION_PIPE_KEY=0x7777")
       Seq("--ipc=shareable")
     } else if (name_val.matches("wsk\\d+_\\d+_guest_.*")) {
       // Application Function
-      val pattern = """wsk(\d+)_\d+_guest_StateFunction\d+""".r
-      val invokerID = name_val match {
-        case pattern(number) => number
-        case _ => "0"
+      val pattern = """wsk(\d+)_(\d+)_guest_.*""".r
+      val (invokerID, containerCount) = name_val match {
+        case pattern(a, b) => (a, b)
+        case _ => ("0", "0")
       }
+      environmentArgs = environmentArgs ++
+        Seq("-e", s"__OW_FUNCTION_TYPE=application-function") ++
+        Seq("-e", s"__OW_ACTION_PIPE_KEY=${containerCount}")
       Seq(s"--ipc=container:wsk${invokerID}_kingdo_guest_StateFunction1")
     } else {
       Seq.empty
@@ -178,7 +188,7 @@ object DockerContainer {
  * use docker commands to achieve the effects needed.
  *
  * @constructor
- * @param id the id of the container
+ * @param id   the id of the container
  * @param addr the ip of the container
  */
 class DockerContainer(protected val id: ContainerId,
@@ -188,7 +198,7 @@ class DockerContainer(protected val id: ContainerId,
                                                       override protected val as: ActorSystem,
                                                       protected val ec: ExecutionContext,
                                                       protected val logging: Logging)
-    extends Container {
+  extends Container {
 
   /** The last read-position in the log file */
   private var logFileOffset = new AtomicLong(0)
@@ -201,9 +211,15 @@ class DockerContainer(protected val id: ContainerId,
   override def suspend()(implicit transid: TransactionId): Future[Unit] = {
     super.suspend().flatMap(_ => if (useRunc) runc.pause(id) else docker.pause(id))
   }
+
   override def resume()(implicit transid: TransactionId): Future[Unit] = {
-    (if (useRunc) { runc.resume(id) } else { docker.unpause(id) }).flatMap(_ => super.resume())
+    (if (useRunc) {
+      runc.resume(id)
+    } else {
+      docker.unpause(id)
+    }).flatMap(_ => super.resume())
   }
+
   override def destroy()(implicit transid: TransactionId): Future[Unit] = {
     super.destroy()
     docker.rm(id)
@@ -229,12 +245,12 @@ class DockerContainer(protected val id: ContainerId,
   }
 
   override protected def callContainer(
-    path: String,
-    body: JsObject,
-    timeout: FiniteDuration,
-    maxConcurrent: Int,
-    retry: Boolean = false,
-    reschedule: Boolean = false)(implicit transid: TransactionId): Future[RunResult] = {
+                                        path: String,
+                                        body: JsObject,
+                                        timeout: FiniteDuration,
+                                        maxConcurrent: Int,
+                                        retry: Boolean = false,
+                                        reschedule: Boolean = false)(implicit transid: TransactionId): Future[RunResult] = {
     val started = Instant.now()
     val http = httpConnection.getOrElse {
       val conn = if (Container.config.akkaClient) {
@@ -268,7 +284,7 @@ class DockerContainer(protected val id: ContainerId,
             // terminal connection error.
             case error: ConnectionError =>
               isOomKilled().map {
-                case true  => MemoryExhausted()
+                case true => MemoryExhausted()
                 case false => error
               }
             case other => Future.successful(other)
@@ -290,25 +306,25 @@ class DockerContainer(protected val id: ContainerId,
    * There are two possible modes controlled by parameter waitForSentinel:
    *
    * 1. Wait for sentinel:
-   *    Tail container log file until two sentinel markers show up. Complete
-   *    once two sentinel markers have been identified, regardless whether more
-   *    data could be read from container log file.
-   *    A log file reading error is reported if sentinels cannot be found.
-   *    Managed action runtimes use the the sentinels to mark the end of
-   *    an individual activation.
+   * Tail container log file until two sentinel markers show up. Complete
+   * once two sentinel markers have been identified, regardless whether more
+   * data could be read from container log file.
+   * A log file reading error is reported if sentinels cannot be found.
+   * Managed action runtimes use the the sentinels to mark the end of
+   * an individual activation.
    *
    * 2. Do not wait for sentinel:
-   *    Read container log file up to its end. Stop reading once the end
-   *    has been reached. Complete once two sentinel markers have been
-   *    identified, regardless whether more data could be read from
-   *    container log file.
-   *    No log file reading error is reported if sentinels cannot be found.
-   *    Blackbox actions do not necessarily produce marker sentinels properly,
-   *    so this mode is used for all blackbox actions.
-   *    In addition, this mode can / should be used in error situations with
-   *    managed action runtimes where sentinel markers may be missing or
-   *    arrive too late - Example: action exceeds time or memory limit during
-   *    init or run.
+   * Read container log file up to its end. Stop reading once the end
+   * has been reached. Complete once two sentinel markers have been
+   * identified, regardless whether more data could be read from
+   * container log file.
+   * No log file reading error is reported if sentinels cannot be found.
+   * Blackbox actions do not necessarily produce marker sentinels properly,
+   * so this mode is used for all blackbox actions.
+   * In addition, this mode can / should be used in error situations with
+   * managed action runtimes where sentinel markers may be missing or
+   * arrive too late - Example: action exceeds time or memory limit during
+   * init or run.
    *
    * The result returned from this method does never contain any log sentinel markers. These are always
    * filtered - regardless of the specified waitForSentinel mode.
@@ -316,7 +332,7 @@ class DockerContainer(protected val id: ContainerId,
    * Only parses and returns as much logs as fit in the passed log limit. Stops log collection with an error
    * if processing takes too long or time gaps between processing individual log lines are too long.
    *
-   * @param limit the limit to apply to the log size
+   * @param limit           the limit to apply to the log size
    * @param waitForSentinel determines if the processor should wait for a sentinel to appear
    * @return a vector of Strings with log lines in our own JSON format
    */
@@ -376,7 +392,7 @@ class DockerContainer(protected val id: ContainerId,
  * '''Errors when''' stream completes, not enough occurrences have been found and errorOnNotEnough is true
  */
 class CompleteAfterOccurrences[T](isInEvent: T => Boolean, neededOccurrences: Int, errorOnNotEnough: Boolean)
-    extends GraphStage[FlowShape[T, T]] {
+  extends GraphStage[FlowShape[T, T]] {
   val in: Inlet[T] = Inlet[T]("WaitForOccurrences.in")
   val out: Outlet[T] = Outlet[T]("WaitForOccurrences.out")
   override val shape: FlowShape[T, T] = FlowShape.of(in, out)
@@ -418,4 +434,4 @@ class CompleteAfterOccurrences[T](isInEvent: T => Boolean, neededOccurrences: In
 
 /** Indicates that Occurrences have not been found in the stream */
 case class OccurrencesNotFoundException(neededCount: Int, actualCount: Int)
-    extends RuntimeException(s"Only found $actualCount out of $neededCount occurrences.")
+  extends RuntimeException(s"Only found $actualCount out of $neededCount occurrences.")
